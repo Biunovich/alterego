@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AlterEgo Side Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-gradient: linear-gradient(135deg, #0f0f15 0%, #151525 100%);
+      --glass-bg: rgba(255, 255, 255, 0.03);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      --text-main: #f1f2f6;
+      --text-muted: #a4b0be;
+      --accent-primary: #ff4757;
+      --accent-secondary: #ff6b81;
+      --accent-glowing: linear-gradient(90deg, #ff4757, #ff6b81, #70a1ff);
+      --card-bg: rgba(15, 15, 25, 0.6);
+      --button-bg: rgba(255, 255, 255, 0.05);
+      --button-hover: rgba(255, 255, 255, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: var(--bg-gradient);
+      color: var(--text-main);
+      width: 100%;
+      min-height: 100vh;
+      padding: 20px;
+      overflow-y: auto;
+    }
+
+    /* Scrollbar Styling */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(0,0,0,0.1);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.1);
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.25);
+    }
+
+    /* Container */
+    .container {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 15px;
+      border-bottom: 1px solid var(--glass-border);
+    }
+
+    .header-logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-text {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: 1.5px;
+      background: var(--accent-glowing);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-transform: uppercase;
+    }
+
+    .status-badge {
+      font-size: 11px;
+      font-weight: 600;
+      background: rgba(46, 213, 115, 0.15);
+      color: #2ed573;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid rgba(46, 213, 115, 0.25);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      background-color: #2ed573;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #2ed573;
+      animation: pulse 1.8s infinite;
+    }
+
+    /* Card Layouts */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      padding: 18px;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+      transition: border-color 0.3s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .section-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    /* Settings Panel */
+    .settings-trigger {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      transition: color 0.3s;
+    }
+
+    .settings-trigger:hover {
+      color: var(--text-main);
+    }
+
+    .settings-panel {
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 5px;
+      padding-top: 15px;
+      border-top: 1px solid var(--glass-border);
+    }
+
+    .input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .input-group label {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .input-field {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--glass-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 13px;
+      transition: all 0.3s ease;
+    }
+
+    .input-field:focus {
+      outline: none;
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 0 2px rgba(255, 71, 87, 0.2);
+    }
+
+    .btn-save {
+      background: var(--button-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 8px;
+      color: var(--text-main);
+      padding: 10px;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+
+    .btn-save:hover {
+      background: var(--button-hover);
+      border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    /* Prompt Box & Inputs */
+    .prompt-area {
+      position: relative;
+    }
+
+    textarea.prompt-input {
+      width: 100%;
+      height: 100px;
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--glass-border);
+      border-radius: 12px;
+      padding: 12px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 14px;
+      resize: none;
+      margin-bottom: 12px;
+      transition: border-color 0.3s ease;
+    }
+
+    textarea.prompt-input:focus {
+      outline: none;
+      border-color: var(--accent-primary);
+    }
+
+    .action-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .btn-picker {
+      background: var(--button-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 10px;
+      color: var(--text-main);
+      padding: 12px 15px;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.3s;
+      flex-shrink: 0;
+    }
+
+    .btn-picker:hover {
+      background: var(--button-hover);
+      border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .btn-picker.active {
+      background: rgba(255, 71, 87, 0.15);
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
+      animation: pulse-border 1.5s infinite;
+    }
+
+    .btn-alter {
+      flex-grow: 1;
+      background: var(--accent-glowing);
+      border: none;
+      border-radius: 10px;
+      color: #ffffff;
+      padding: 12px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, opacity 0.2s;
+      box-shadow: 0 4px 15px rgba(255, 71, 87, 0.3);
+    }
+
+    .btn-alter:hover {
+      transform: translateY(-2px);
+      opacity: 0.95;
+    }
+
+    .btn-alter:active {
+      transform: translateY(0);
+    }
+
+    .picker-indicator {
+      display: none;
+      font-size: 12px;
+      color: var(--accent-primary);
+      margin-top: 8px;
+      font-weight: 500;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .picker-indicator.active {
+      display: flex;
+    }
+
+    .picker-indicator span {
+      background: rgba(255, 71, 87, 0.15);
+      padding: 2px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 71, 87, 0.3);
+      font-family: monospace;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Loader & Progress */
+    .loader-overlay {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 15px;
+      margin: 15px 0;
+      padding: 20px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 12px;
+      border: 1px dashed var(--glass-border);
+    }
+
+    .loader-overlay.active {
+      display: flex;
+    }
+
+    .spinner {
+      width: 30px;
+      height: 30px;
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-radius: 50%;
+      border-top-color: var(--accent-primary);
+      animation: spin 1s linear infinite;
+    }
+
+    .loader-text {
+      font-size: 13px;
+      color: var(--text-muted);
+      text-align: center;
+      font-weight: 400;
+    }
+
+    /* Customizations List */
+    .customization-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .customization-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--glass-border);
+      border-radius: 12px;
+    }
+
+    .customization-info {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      flex-grow: 1;
+      margin-right: 12px;
+    }
+
+    .customization-domain {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .customization-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+
+    .customization-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    /* Switch Styling */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 38px;
+      height: 20px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: rgba(255, 255, 255, 0.15);
+      transition: .3s;
+      border-radius: 34px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 14px;
+      width: 14px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: var(--accent-primary);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(18px);
+    }
+
+    .btn-delete {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      transition: color 0.3s;
+    }
+
+    .btn-delete:hover {
+      color: #ff4757;
+    }
+
+    .btn-edit-script:hover {
+      color: var(--text-main) !important;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 20px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    /* Reset Button */
+    .btn-reset {
+      margin-top: 5px;
+      background: rgba(255, 71, 87, 0.08);
+      border: 1px solid rgba(255, 71, 87, 0.2);
+      border-radius: 10px;
+      color: #ff4757;
+      padding: 10px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      width: 100%;
+    }
+
+    .btn-reset:hover {
+      background: rgba(255, 71, 87, 0.15);
+      border-color: var(--accent-primary);
+    }
+
+    /* Keyframes */
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(46, 213, 115, 0.4); }
+      70% { box-shadow: 0 0 0 6px rgba(46, 213, 115, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(46, 213, 115, 0); }
+    }
+
+    @keyframes pulse-border {
+      0% { box-shadow: 0 0 0 0 rgba(255, 71, 87, 0.3); }
+      70% { box-shadow: 0 0 0 5px rgba(255, 71, 87, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(255, 71, 87, 0); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    
+    <!-- 1. Header -->
+    <div class="header">
+      <div class="header-logo">
+        <span class="logo-text">AlterEgo</span>
+      </div>
+      <div class="status-badge" id="status-badge">
+        <div class="status-dot"></div>
+        <span id="status-text">Ready</span>
+      </div>
+    </div>
+
+    <!-- 2. AI Connection Config Card (Collapsible) -->
+    <div class="card">
+      <div class="section-title">
+        <span>AI Connection Settings</span>
+        <button class="settings-trigger" id="settings-toggle" title="Toggle Configuration">⚙️</button>
+      </div>
+      <div class="settings-panel" id="settings-panel">
+        <div class="input-group">
+          <label for="api-key">API Key</label>
+          <input type="password" id="api-key" class="input-field" placeholder="Enter API Key...">
+        </div>
+        <div class="input-group">
+          <label for="api-provider">AI Provider</label>
+          <select id="api-provider" class="input-field" style="background: rgba(0, 0, 0, 0.3); color: var(--text-main); font-family: inherit; font-size: 13px; height: 38px;">
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="groq">Groq</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="custom">Custom / Local Provider</option>
+          </select>
+        </div>
+        <div class="input-group" id="base-url-group">
+          <label for="base-url">Base URL</label>
+          <input type="text" id="base-url" class="input-field" value="https://api.openai.com/v1">
+        </div>
+        <div class="input-group">
+          <label for="model-name">Model Name</label>
+          <div style="display: flex; gap: 8px; align-items: center; width: 100%;">
+            <select id="model-name" class="input-field" style="flex-grow: 1; min-width: 0; background: rgba(0, 0, 0, 0.3); color: var(--text-main); font-family: inherit; font-size: 13px; height: 38px;">
+              <option value="" disabled selected>Fetch models...</option>
+            </select>
+            <button class="btn-save" id="btn-fetch-models" style="padding: 10px 14px; font-size: 11px; flex-shrink: 0; height: 38px;" type="button">Fetch</button>
+          </div>
+        </div>
+        <button class="btn-save" id="btn-save-settings">Save API Configuration</button>
+      </div>
+    </div>
+
+    <!-- 3. Prompt Customizer Panel -->
+    <div class="card">
+      <div class="section-title">Customize current tab</div>
+      <div class="prompt-area">
+        <div id="iteration-status" style="display: none; justify-content: space-between; align-items: center; font-size: 11px; color: #ff9f43; margin-bottom: 10px; background: rgba(255, 159, 67, 0.1); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255, 159, 67, 0.25); width: 100%;">
+          <span id="iteration-status-text">🔄 Refining: "Script Name"...</span>
+          <button id="btn-cancel-refine" style="background: none; border: none; color: #ff9f43; cursor: pointer; font-size: 14px; font-weight: bold; line-height: 1;" type="button">✕</button>
+        </div>
+        <textarea class="prompt-input" id="prompt-input" placeholder="e.g. Hide the sidebar, make links purple, and add a TL;DR summary badge next to headers..."></textarea>
+        
+        <div class="picker-indicator" id="picker-indicator">
+          Selected: <span id="picker-selector-text">None</span>
+        </div>
+        
+        <div class="action-row" style="margin-top: 10px;">
+          <button class="btn-picker" id="btn-picker" title="Pick an element on page to target specifically">
+            🎯 Pick Target
+          </button>
+          <button class="btn-alter" id="btn-alter">Alter Page</button>
+        </div>
+      </div>
+
+      <!-- Spinner Loader -->
+      <div class="loader-overlay" id="loader-overlay">
+        <div class="spinner"></div>
+        <div class="loader-text" id="loader-text">Analyzing page and compiling script...</div>
+      </div>
+    </div>
+
+    <!-- 4. Active Scripts Manager Card -->
+    <div class="card">
+      <div class="section-title" id="customizations-title">Active Modifications</div>
+      <div class="customization-list" id="customization-list">
+        <div class="empty-state">No adjustments registered yet.</div>
+      </div>
+      <button class="btn-reset" id="btn-reset-page">Reset Page Layout</button>
+    </div>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
