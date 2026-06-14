@@ -19,7 +19,25 @@
   // Compute a clean, robust, unique CSS selector for any element
   function getUniqueSelector(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
-    if (el.id) {
+
+    // Helper to check for dynamic classes or IDs
+    function isDynamic(val) {
+      return !val || /^\d|:\w+:|__|\d{4,}/.test(val);
+    }
+
+    // 1. Check for stable data attributes or name
+    const stableAttrs = ['data-testid', 'name', 'role', 'placeholder', 'aria-label'];
+    for (let attr of stableAttrs) {
+      if (el.hasAttribute(attr)) {
+        const val = el.getAttribute(attr);
+        if (val && val.trim().length > 0 && val.length < 50) {
+          return `${el.tagName.toLowerCase()}[${attr}="${val.trim().replace(/"/g, '\\"')}"]`;
+        }
+      }
+    }
+
+    // 2. Check for stable ID
+    if (el.id && !isDynamic(el.id)) {
       return `#${el.id}`;
     }
 
@@ -29,42 +47,68 @@
     while (current && current.nodeType === Node.ELEMENT_NODE) {
       let selector = current.nodeName.toLowerCase();
       
-      // Stop climbing if we hit body/html
       if (selector === 'body' || selector === 'html') {
         path.unshift(selector);
         break;
       }
 
-      // Append first 2 class names if applicable
-      if (current.className && typeof current.className === 'string') {
-        const classes = current.className.trim().split(/\s+/).filter(c => !c.startsWith('alterego-') && c.length > 0);
-        if (classes.length > 0) {
-          selector += '.' + classes.slice(0, 2).join('.');
+      // Check stable attribute on the ancestor
+      let foundStable = false;
+      for (let attr of stableAttrs) {
+        if (current.hasAttribute(attr)) {
+          const val = current.getAttribute(attr);
+          if (val && val.trim().length > 0 && val.length < 50) {
+            selector += `[${attr}="${val.trim().replace(/"/g, '\\"')}"]`;
+            foundStable = true;
+            break;
+          }
         }
       }
 
-      // Calculate nth-of-type if it has siblings of same tag
-      let sibling = current.previousElementSibling;
-      let nth = 1;
-      while (sibling) {
-        if (sibling.nodeName === current.nodeName) {
-          nth++;
+      if (!foundStable) {
+        if (current.id && !isDynamic(current.id)) {
+          selector = `#${current.id}`;
+          path.unshift(selector);
+          break; // Stop climbing if we hit a stable ID
         }
-        sibling = sibling.previousElementSibling;
-      }
 
-      let siblingNext = current.nextElementSibling;
-      let hasTagSiblings = false;
-      while (siblingNext) {
-        if (siblingNext.nodeName === current.nodeName) {
-          hasTagSiblings = true;
-          break;
+        // Filter out dynamic-looking utility classes
+        if (current.className && typeof current.className === 'string') {
+          const classes = current.className.trim().split(/\s+/)
+            .filter(c => {
+              return c.length > 0 && 
+                     !c.startsWith('alterego-') && 
+                     !/\d|__/.test(c) && 
+                     c.length < 25;
+            });
+          if (classes.length > 0) {
+            selector += '.' + classes.slice(0, 2).join('.');
+          }
         }
-        siblingNext = siblingNext.nextElementSibling;
-      }
 
-      if (nth > 1 || hasTagSiblings) {
-        selector += `:nth-of-type(${nth})`;
+        // Calculate nth-of-type if it has siblings of same tag
+        let sibling = current.previousElementSibling;
+        let nth = 1;
+        while (sibling) {
+          if (sibling.nodeName === current.nodeName) {
+            nth++;
+          }
+          sibling = sibling.previousElementSibling;
+        }
+
+        let siblingNext = current.nextElementSibling;
+        let hasTagSiblings = false;
+        while (siblingNext) {
+          if (siblingNext.nodeName === current.nodeName) {
+            hasTagSiblings = true;
+            break;
+          }
+          siblingNext = siblingNext.nextElementSibling;
+        }
+
+        if (nth > 1 || hasTagSiblings) {
+          selector += `:nth-of-type(${nth})`;
+        }
       }
 
       path.unshift(selector);
@@ -72,6 +116,51 @@
     }
 
     return path.join(' > ');
+  }
+
+  // Extract focused DOM structure around a specific selector
+  function getTargetedDOMContext(selector) {
+    if (!selector) return '';
+    try {
+      const el = document.querySelector(selector);
+      if (!el) return `[Element for selector "${selector}" not found]`;
+
+      const parent = el.parentElement || el;
+      let desc = `Ancestors & Siblings of targeted element:\n`;
+      
+      function serializeNode(node, isTarget) {
+        let tag = node.tagName.toLowerCase();
+        let str = `<${tag}`;
+        if (node.id) str += ` id="${node.id}"`;
+        if (node.className && typeof node.className === 'string') {
+          str += ` class="${node.className.trim()}"`;
+        }
+        for (let attr of ['placeholder', 'name', 'type', 'role', 'aria-label', 'data-testid']) {
+          if (node.hasAttribute(attr)) {
+            str += ` ${attr}="${node.getAttribute(attr)}"`;
+          }
+        }
+        str += `>${isTarget ? '  <-- TARGET ELEMENT' : ''}`;
+        const txt = node.textContent ? node.textContent.trim().substring(0, 50) : '';
+        if (txt) str += ` (Text: "${txt}")`;
+        str += `</${tag}>`;
+        return str;
+      }
+
+      desc += `Parent: ${serializeNode(parent, false)}\n`;
+      for (let child of parent.children) {
+        const isTarget = (child === el);
+        desc += `  ${isTarget ? '=>' : '  '} ${serializeNode(child, isTarget)}\n`;
+        if (isTarget) {
+          for (let gchild of child.children) {
+            desc += `       - child: ${serializeNode(gchild, false)}\n`;
+          }
+        }
+      }
+      return desc;
+    } catch (err) {
+      return `[Failed to extract targeted context: ${err.message}]`;
+    }
   }
 
   // Traverse the DOM to build a lightweight, semantic layout outline
@@ -188,14 +277,27 @@
     console.log('[AlterEgo] Selector picking stopped.');
   }
 
-  // Listen for custom script errors from USER_SCRIPT world and bridge to background
-  window.addEventListener('alterego-script-error', (e) => {
-    console.log('[AlterEgo] Caught error from user script world:', e.detail);
+  // Listen for custom script status events from USER_SCRIPT world and bridge to background
+  window.addEventListener('alterego-script-status', (e) => {
+    console.log('[AlterEgo] Caught status from user script world:', e.detail);
     chrome.runtime.sendMessage({
-      action: 'report-script-error',
+      action: 'report-script-status',
+      status: e.detail.status,
+      error: e.detail.error
+    }).catch(err => {
+      console.warn('[AlterEgo] Failed to relay script status to background:', err);
+    });
+  });
+
+  // Keep old listener for backward compatibility with older generated scripts
+  window.addEventListener('alterego-script-error', (e) => {
+    console.log('[AlterEgo] Caught legacy error from user script world:', e.detail);
+    chrome.runtime.sendMessage({
+      action: 'report-script-status',
+      status: 'error',
       error: e.detail
     }).catch(err => {
-      console.warn('[AlterEgo] Failed to relay script error to background:', err);
+      console.warn('[AlterEgo] Failed to relay legacy script error to background:', err);
     });
   });
 
@@ -203,9 +305,10 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'get-context') {
       const context = getSimplifiedDOMContext();
+      const targetedContext = message.targetSelector ? getTargetedDOMContext(message.targetSelector) : '';
       const title = document.title;
       const url = window.location.href;
-      sendResponse({ context, title, url });
+      sendResponse({ context, targetedContext, title, url });
     } else if (message.action === 'start-picking') {
       startPicking();
       sendResponse({ status: 'picking_started' });

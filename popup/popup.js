@@ -411,7 +411,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       // 2. Fetch DOM context
-      const contextResponse = await chrome.tabs.sendMessage(currentTab.id, { action: 'get-context' });
+      const contextResponse = await chrome.tabs.sendMessage(currentTab.id, {
+        action: 'get-context',
+        targetSelector: selectedSelector
+      });
       
       loaderText.textContent = 'AI is writing your customized scripts...';
 
@@ -421,6 +424,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         prompt: prompt,
         domain: currentDomain,
         context: contextResponse.context,
+        targetedContext: contextResponse.targetedContext || '',
         targetSelector: selectedSelector,
         id: activeRefineId,
         tabId: currentTab.id

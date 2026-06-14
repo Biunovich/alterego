@@ -8,7 +8,8 @@ import {
   SYSTEM_PROMPT_INITIAL,
   buildUserPromptInitial,
   SYSTEM_PROMPT_RETRY,
-  buildUserPromptRetry
+  buildUserPromptRetry,
+  buildRefinementUserPrompt
 } from './prompts.js';
 
 // 1. Configure Side Panel to open on action click
@@ -48,23 +49,78 @@ function compileUserScriptWrapper(css, js) {
       (document.head || document.documentElement).appendChild(style);
     }
 
+    // Capture global unhandled exceptions in this script context
+    window.addEventListener('error', function(errEvent) {
+      console.error('[AlterEgo] Unhandled script exception:', errEvent.error);
+      const event = new CustomEvent('alterego-script-status', {
+        detail: {
+          status: 'error',
+          error: {
+            message: errEvent.message || 'Unhandled error',
+            stack: errEvent.error && errEvent.error.stack ? errEvent.error.stack.toString() : '',
+            name: errEvent.error && errEvent.error.name ? errEvent.error.name : 'UnhandledException'
+          }
+        }
+      });
+      window.dispatchEvent(event);
+    });
+
+    window.addEventListener('unhandledrejection', function(promiseEvent) {
+      console.error('[AlterEgo] Unhandled promise rejection:', promiseEvent.reason);
+      const reason = promiseEvent.reason || {};
+      const event = new CustomEvent('alterego-script-status', {
+        detail: {
+          status: 'error',
+          error: {
+            message: reason.message || 'Unhandled promise rejection',
+            stack: reason.stack ? reason.stack.toString() : '',
+            name: reason.name || 'PromiseRejection'
+          }
+        }
+      });
+      window.dispatchEvent(event);
+    });
+
     // 2. Wrap and run user-defined Javascript when DOM is ready
     function runJS() {
       try {
         console.log('[AlterEgo] Executing customized behavior...');
         ${js}
+        // Success signal (if synchronous run finishes without error)
+        window.dispatchEvent(new CustomEvent('alterego-script-status', {
+          detail: { status: 'success' }
+        }));
       } catch (err) {
         console.error('[AlterEgo] Runtime script error:', err);
-        const event = new CustomEvent('alterego-script-error', {
+        window.dispatchEvent(new CustomEvent('alterego-script-status', {
           detail: {
-            message: err.message,
-            stack: err.stack ? err.stack.toString() : '',
-            name: err.name || 'Error'
+            status: 'error',
+            error: {
+              message: err.message,
+              stack: err.stack ? err.stack.toString() : '',
+              name: err.name || 'Error'
+            }
           }
-        });
-        window.dispatchEvent(event);
+        }));
       }
     }
+
+    // SPA virtual navigation observer
+    let lastUrl = location.href;
+    const urlObserver = new MutationObserver(() => {
+      if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        console.log('[AlterEgo] SPA Navigation detected, re-applying script...');
+        if (cssContent && !document.getElementById('alterego-style-injected')) {
+          const style = document.createElement('style');
+          style.id = 'alterego-style-injected';
+          style.textContent = cssContent;
+          (document.head || document.documentElement).appendChild(style);
+        }
+        runJS();
+      }
+    });
+    urlObserver.observe(document.documentElement, { childList: true, subtree: true });
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', runJS);
@@ -203,7 +259,40 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
   }
 });
 
-const runtimeErrors = {}; // key: tabId, value: Array of error objects
+// Storage Session helpers for tab runtime errors (MV3 state safety)
+async function getTabErrors(tabId) {
+  try {
+    const { tabErrors = {} } = await chrome.storage.session.get('tabErrors');
+    return tabErrors[tabId] || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function clearTabErrors(tabId) {
+  try {
+    const { tabErrors = {} } = await chrome.storage.session.get('tabErrors');
+    delete tabErrors[tabId];
+    await chrome.storage.session.set({ tabErrors });
+  } catch (e) {
+    console.error('[AlterEgo] Failed to clear tab errors:', e);
+  }
+}
+
+async function addTabError(tabId, error) {
+  try {
+    const { tabErrors = {} } = await chrome.storage.session.get('tabErrors');
+    if (!tabErrors[tabId]) {
+      tabErrors[tabId] = [];
+    }
+    tabErrors[tabId].push(error);
+    await chrome.storage.session.set({ tabErrors });
+  } catch (e) {
+    console.error('[AlterEgo] Failed to add tab error:', e);
+  }
+}
+
+const activeVerifications = {}; // key: tabId, value: { resolve, statusReceived }
 
 // Helper: send progress updates to the popup/side panel
 async function sendProgress(tabId, message) {
@@ -229,17 +318,27 @@ function parseJSONResponse(rawText) {
 
 // 3. Handle incoming messages from Popup / Content Scripts
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  // Capture script errors immediately
-  if (request.action === 'report-script-error') {
+  // Capture script status immediately (success or error)
+  if (request.action === 'report-script-status') {
     const tabId = sender.tab ? sender.tab.id : null;
     if (tabId) {
-      if (!runtimeErrors[tabId]) {
-        runtimeErrors[tabId] = [];
-      }
-      runtimeErrors[tabId].push(request.error);
-      console.log(`[AlterEgo] Logged runtime error for tab ${tabId}:`, request.error);
+      (async () => {
+        if (request.status === 'error' && request.error) {
+          await addTabError(tabId, request.error);
+          console.log(`[AlterEgo] Logged runtime error for tab ${tabId}:`, request.error);
+        } else {
+          console.log(`[AlterEgo] Logged success status for tab ${tabId}`);
+        }
+        
+        if (activeVerifications[tabId]) {
+          activeVerifications[tabId].statusReceived = request.status;
+          activeVerifications[tabId].resolve(request.status);
+        }
+        sendResponse({ success: true });
+      })();
+    } else {
+      sendResponse({ success: true });
     }
-    sendResponse({ success: true });
     return true;
   }
 
@@ -247,7 +346,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const handleMessage = async () => {
     try {
       if (request.action === 'generate-customization') {
-        const { prompt, domain, context, targetSelector, id } = request;
+        const { prompt, domain, context, targetedContext, targetSelector, id } = request;
         
         let tabId = request.tabId;
         if (!tabId) {
@@ -272,6 +371,46 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const scriptId = id || `alterego-script-${Date.now()}`;
         const existing = id ? (customizations[id] || null) : null;
 
+        // Retrieve or initialize the conversation history
+        let conversationHistory = [];
+        if (existing) {
+          if (existing.history && Array.isArray(existing.history)) {
+            conversationHistory = [...existing.history];
+          } else {
+            // Seed history from existing customization
+            const seedUserPrompt = buildUserPromptInitial(
+              domain,
+              targetSelector,
+              existing.prompt || prompt,
+              null,
+              context,
+              targetedContext
+            );
+            const seedAssistantPrompt = JSON.stringify({
+              css: existing.css,
+              js: existing.js,
+              verificationSelector: existing.verificationSelector || '',
+              description: existing.description || ''
+            });
+            conversationHistory = [
+              { role: 'user', content: seedUserPrompt },
+              { role: 'assistant', content: seedAssistantPrompt }
+            ];
+          }
+        }
+
+        let sessionMessages = [];
+        if (existing) {
+          sessionMessages = [
+            ...conversationHistory,
+            { role: 'user', content: buildRefinementUserPrompt(prompt) }
+          ];
+        } else {
+          sessionMessages = [
+            { role: 'user', content: buildUserPromptInitial(domain, targetSelector, prompt, null, context, targetedContext) }
+          ];
+        }
+
         let content = null;
         let attempt = 1;
         const maxAttempts = 3;
@@ -279,21 +418,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         let verified = false;
 
         // Clear errors before starting
-        runtimeErrors[tabId] = [];
+        await clearTabErrors(tabId);
 
         while (attempt <= maxAttempts) {
           await sendProgress(tabId, `Attempt ${attempt}/${maxAttempts}: Querying AI model...`);
 
-          let systemPrompt = "";
-          let userPrompt = "";
-
-          if (attempt === 1) {
-            systemPrompt = SYSTEM_PROMPT_INITIAL;
-            userPrompt = buildUserPromptInitial(domain, targetSelector, prompt, existing, context);
-          } else {
-            systemPrompt = SYSTEM_PROMPT_RETRY;
-            userPrompt = buildUserPromptRetry(domain, prompt, content.css, content.js, verificationFailureReason, context);
-          }
+          let systemPrompt = (attempt === 1) ? SYSTEM_PROMPT_INITIAL : SYSTEM_PROMPT_RETRY;
+          
+          let apiMessages = [
+            { role: 'system', content: systemPrompt },
+            ...sessionMessages
+          ];
 
           // Request completions from OpenAI-compatible endpoint
           const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
@@ -305,10 +440,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             },
             body: JSON.stringify({
               model: model,
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userPrompt }
-              ],
+              messages: apiMessages,
               response_format: { type: 'json_object' },
               temperature: 0.2
             })
@@ -333,16 +465,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           await registerUserScript(domain, scriptId, content.css, content.js);
 
           // Clear errors on tab before reload to ensure we only capture errors from this run
-          runtimeErrors[tabId] = [];
+          await clearTabErrors(tabId);
+
+          // Set up verifier before reloading
+          let resolveStatus;
+          const statusPromise = new Promise((resolve) => {
+            resolveStatus = resolve;
+          });
+          
+          activeVerifications[tabId] = {
+            resolve: resolveStatus,
+            statusReceived: null
+          };
+
+          const checkTabListener = (updatedTabId, changeInfo) => {
+            if (updatedTabId === tabId && changeInfo.status === 'complete') {
+              resolveStatus('complete');
+            }
+          };
+
+          chrome.tabs.onUpdated.addListener(checkTabListener);
+
+          const timeoutId = setTimeout(() => {
+            resolveStatus('timeout');
+          }, 7000);
 
           // Reload tab
           await chrome.tabs.reload(tabId);
 
-          // Wait 1.5 seconds for execution
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          const waitResult = await statusPromise;
+
+          // Cleanup
+          chrome.tabs.onUpdated.removeListener(checkTabListener);
+          clearTimeout(timeoutId);
+          delete activeVerifications[tabId];
+          console.log(`[AlterEgo] Verification wait ended for tab ${tabId} with result:`, waitResult);
+
+          if (waitResult === 'complete') {
+            // Give it a tiny bit of time for DOM/scripts to execute
+            await new Promise(resolve => setTimeout(resolve, 400));
+          }
 
           // Verify status
-          const errors = runtimeErrors[tabId] || [];
+          const errors = await getTabErrors(tabId);
           let domVerified = true;
           let domErrorMsg = "";
 
@@ -371,10 +536,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               verificationFailureReason += `\n\nAdditionally: ${domErrorMsg}`;
             }
             await sendProgress(tabId, `⚠️ Attempt ${attempt} failed with JS runtime error. Self-healing...`);
+            
+            // Append retry context to sessionMessages for the next turn
+            sessionMessages.push({
+              role: 'assistant',
+              content: rawResponseText
+            });
+            sessionMessages.push({
+              role: 'user',
+              content: buildUserPromptRetry(domain, prompt, content.css, content.js, verificationFailureReason, context)
+            });
             attempt++;
           } else if (!domVerified) {
             verificationFailureReason = `DOM Verification Failed:\n${domErrorMsg}`;
             await sendProgress(tabId, `⚠️ Attempt ${attempt} failed: verification selector not found. Self-healing...`);
+            
+            // Append retry context to sessionMessages for the next turn
+            sessionMessages.push({
+              role: 'assistant',
+              content: rawResponseText
+            });
+            sessionMessages.push({
+              role: 'user',
+              content: buildUserPromptRetry(domain, prompt, content.css, content.js, verificationFailureReason, context)
+            });
             attempt++;
           } else {
             verified = true;
@@ -387,6 +572,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           throw new Error(`Self-healing failed after ${maxAttempts} attempts.\nLast failure: ${verificationFailureReason}`);
         }
 
+        // Construct the updated conversation history
+        const finalHistory = [
+          ...conversationHistory,
+          { role: 'user', content: existing ? buildRefinementUserPrompt(prompt) : buildUserPromptInitial(domain, targetSelector, prompt, null, context, targetedContext) },
+          { role: 'assistant', content: JSON.stringify({
+              css: content.css,
+              js: content.js,
+              verificationSelector: content.verificationSelector || '',
+              description: content.description || ''
+            }) 
+          }
+        ];
+
         // Store customization in local storage
         customizations[scriptId] = {
           id: scriptId,
@@ -396,7 +594,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           js: content.js,
           enabled: true,
           verificationSelector: content.verificationSelector || '',
-          description: content.description || 'Custom layout and behaviors.'
+          description: content.description || 'Custom layout and behaviors.',
+          history: finalHistory
         };
         await chrome.storage.local.set({ customizations });
 

@@ -24,7 +24,7 @@ Rules:
 5. If the user wants to add summaries/tags to items, write code that selects those items, extracts text, and appends a clean DOM pill or badge next to them. Keep styles premium and modern.
 `;
 
-export function buildUserPromptInitial(domain, targetSelector, prompt, existing, context) {
+export function buildUserPromptInitial(domain, targetSelector, prompt, existing, context, targetedContext) {
   let userPrompt = `
 Website URL/Domain: ${domain}
 Target Selector (Primary Element clicked by user): ${targetSelector || 'None'}
@@ -40,6 +40,16 @@ ${existing.css}
 
 --- Existing JS ---
 ${existing.js}
+`;
+  }
+
+  if (targetedContext) {
+    userPrompt += `
+
+Targeted Element Context (Focused DOM around chosen element):
+\`\`\`
+${targetedContext}
+\`\`\`
 `;
   }
 
@@ -91,4 +101,10 @@ Simplified Webpage DOM Context:
 ${context}
 \`\`\`
 `;
+}
+
+export function buildRefinementUserPrompt(prompt) {
+  return `User Request for Refinement: "${prompt}"
+
+Please update the customization code (both CSS and JS) based on this request. Return the complete updated customization (merging these changes with the previous styles/scripts) in the requested JSON format. Keep previous styling and features intact unless the user explicitly requested to modify or remove them.`;
 }
