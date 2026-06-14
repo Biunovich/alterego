@@ -325,11 +325,12 @@
 
   // Listen for API requests from USER_SCRIPT world and relay them to background
   window.addEventListener('alterego-api-request', (e) => {
-    const { requestId, action, payload } = e.detail || {};
+    const { requestId, action, token, payload } = e.detail || {};
     console.log('[AlterEgo] Relaying API request from user script:', action, requestId);
     chrome.runtime.sendMessage({
       action: 'alterego-api-request-relay',
       apiAction: action,
+      token: token,
       payload: payload
     }).then(response => {
       console.log('[AlterEgo] Received API response from background, sending back to user script:', requestId);

@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const baseUrlInput = document.getElementById('base-url');
   const baseUrlGroup = document.getElementById('base-url-group');
   const modelNameInput = document.getElementById('model-name');
+  const modelList = document.getElementById('model-list');
 
   const WELL_KNOWN_PROVIDERS = ['openai', 'deepseek', 'openrouter', 'groq', 'gemini'];
 
@@ -80,13 +81,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     apiProviderSelect.value = matchedProvider;
     updateBaseUrlVisibility(matchedProvider);
     
-    // Ensure the saved model option is dynamically added to the list
+    // Ensure the saved model is set in the input
     if (model) {
-      modelNameInput.innerHTML = ''; // Clear the "Fetch models..." placeholder
-      const opt = document.createElement('option');
-      opt.value = model;
-      opt.textContent = model;
-      modelNameInput.appendChild(opt);
       modelNameInput.value = model;
     }
 
@@ -130,7 +126,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const data = await response.json();
       if (data && data.data && Array.isArray(data.data)) {
         const currentSelected = modelNameInput.value;
-        modelNameInput.innerHTML = '';
+        modelList.innerHTML = ''; // Clear datalist options
 
         // Sort model names alphabetically
         const models = data.data.map(m => m.id).sort();
@@ -138,16 +134,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         models.forEach(modelId => {
           const opt = document.createElement('option');
           opt.value = modelId;
-          opt.textContent = modelId;
-          modelNameInput.appendChild(opt);
+          modelList.appendChild(opt);
         });
 
-        // Re-select previously saved model if it's in the list
-        const optionExists = Array.from(modelNameInput.options).some(opt => opt.value === currentSelected);
-        if (optionExists) {
+        if (currentSelected) {
           modelNameInput.value = currentSelected;
-        } else if (modelNameInput.options.length > 0) {
-          modelNameInput.selectedIndex = 0;
         }
 
         showStatus('Models Loaded', '#2ed573');
@@ -174,8 +165,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (provider === 'custom') {
       baseUrlInput.value = 'http://localhost:11434/v1';
     }
-    // Reset model selection when the provider is changed to prevent loading invalid models
-    modelNameInput.innerHTML = '<option value="" disabled selected>Fetch models...</option>';
+    // Reset model selection options when the provider is changed to prevent loading invalid models
+    modelList.innerHTML = '';
     updateBaseUrlVisibility(provider);
 
     // Auto-fetch models if API key is entered

@@ -550,12 +550,11 @@
           <label for="base-url">Base URL</label>
           <input type="text" id="base-url" class="input-field" value="https://api.openai.com/v1">
         </div>
-        <div class="input-group">
+         <div class="input-group">
           <label for="model-name">Model Name</label>
           <div style="display: flex; gap: 8px; align-items: center; width: 100%;">
-            <select id="model-name" class="input-field" style="flex-grow: 1; min-width: 0; background: rgba(0, 0, 0, 0.3); color: var(--text-main); font-family: inherit; font-size: 13px; height: 38px;">
-              <option value="" disabled selected>Fetch models...</option>
-            </select>
+            <input type="text" id="model-name" list="model-list" class="input-field" placeholder="e.g. gpt-4o, llama3..." style="flex-grow: 1; min-width: 0; background: rgba(0, 0, 0, 0.3); color: var(--text-main); font-family: inherit; font-size: 13px; height: 38px;">
+            <datalist id="model-list"></datalist>
             <button class="btn-save" id="btn-fetch-models" style="padding: 10px 14px; font-size: 11px; flex-shrink: 0; height: 38px;" type="button">Fetch</button>
           </div>
         </div>

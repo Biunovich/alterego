@@ -35,11 +35,13 @@ function getDomain(url) {
 }
 
 // Helper: Compile wrapper user script that handles styled injection at start and JS execution at load
-function compileUserScriptWrapper(css, js) {
+function compileUserScriptWrapper(css, js, apiToken) {
   // Escape backticks and template literals safely
   const escapedCss = css ? css.replace(/`/g, '\\`').replace(/\${/g, '\\${') : '';
   
   return `(function() {
+    const ALTEREGO_API_TOKEN = "${apiToken || ''}";
+
     // Helper function to call the background AI model
     function askAlterEgoAI(promptText) {
       return new Promise((resolve, reject) => {
@@ -54,7 +56,7 @@ function compileUserScriptWrapper(css, js) {
         };
         window.addEventListener('alterego-api-response-' + requestId, handler);
         window.dispatchEvent(new CustomEvent('alterego-api-request', {
-          detail: { requestId, action: 'ai-completion', payload: { prompt: promptText } }
+          detail: { requestId, action: 'ai-completion', token: ALTEREGO_API_TOKEN, payload: { prompt: promptText } }
         }));
       });
     }
@@ -184,10 +186,45 @@ function compileUserScriptWrapper(css, js) {
   })();`;
 }
 
+// Helper: Generate a unique API capability token per session/customization
+function generateApiToken() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
+
+// Helper: Prune user prompt content by removing large context blocks to save storage
+function pruneUserMessageContent(content) {
+  if (typeof content !== 'string') return content;
+  let pruned = content;
+  pruned = pruned.replace(/Targeted Element Context \(Focused DOM around chosen element\):\s*```[\s\S]*?```/g, '[Targeted Element Context Pruned]');
+  pruned = pruned.replace(/Simplified Webpage DOM Context:\s*```[\s\S]*?```/g, '[Simplified Webpage DOM Context Pruned]');
+  return pruned;
+}
+
+// Helper: Prune history messages and limit history size to 5 turns (10 messages)
+function pruneHistory(history) {
+  if (!Array.isArray(history)) return [];
+  let prunedHistory = history.map(item => {
+    if (item.role === 'user') {
+      return {
+        ...item,
+        content: pruneUserMessageContent(item.content)
+      };
+    }
+    return item;
+  });
+  if (prunedHistory.length > 10) {
+    prunedHistory = prunedHistory.slice(-10);
+  }
+  return prunedHistory;
+}
+
 // Helper: Register a script with the chrome.userScripts API
-async function registerUserScript(domain, scriptId, css, js) {
+async function registerUserScript(domain, scriptId, css, js, apiToken) {
   checkUserScriptsAvailable();
-  const code = compileUserScriptWrapper(css, js);
+  const code = compileUserScriptWrapper(css, js, apiToken);
   
   // Clean up any existing registration with same ID first
   try {
@@ -265,15 +302,24 @@ async function reinitializeScripts() {
     console.error('[AlterEgo] Error clearing registered scripts on startup:', e);
   }
 
+  let storageUpdated = false;
   // Register all enabled customizations
   for (const config of Object.values(customizations)) {
+    if (!config.apiToken) {
+      config.apiToken = generateApiToken();
+      storageUpdated = true;
+    }
     if (config.enabled) {
       try {
-        await registerUserScript(config.domain, config.id, config.css, config.js);
+        await registerUserScript(config.domain, config.id, config.css, config.js, config.apiToken);
       } catch (err) {
         console.error(`[AlterEgo] Failed to register script for ${config.domain} on startup:`, err);
       }
     }
+  }
+
+  if (storageUpdated) {
+    await chrome.storage.local.set({ customizations });
   }
 }
 
@@ -294,7 +340,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
         // Script was added, modified, or toggled
         if (newConfig.enabled) {
           try {
-            await registerUserScript(newConfig.domain, newConfig.id, newConfig.css, newConfig.js);
+            await registerUserScript(newConfig.domain, newConfig.id, newConfig.css, newConfig.js, newConfig.apiToken);
           } catch (err) {
             console.error(`[AlterEgo] Failed to auto-reload changed script ${newConfig.id}:`, err);
           }
@@ -402,13 +448,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'alterego-api-request-relay') {
-    const { apiAction, payload } = request;
+    const { apiAction, token, payload } = request;
     if (apiAction === 'ai-completion') {
       (async () => {
         try {
-          const { apiKey, baseUrl, model } = await chrome.storage.local.get(['apiKey', 'baseUrl', 'model']);
+          const senderUrl = sender.tab ? sender.tab.url : (sender.url || '');
+          const domain = getDomain(senderUrl);
+          if (!domain) {
+            sendResponse({ success: false, error: 'Unauthorized: Unable to verify sender domain.' });
+            return;
+          }
+
+          const { apiKey, baseUrl, model, customizations = {} } = await chrome.storage.local.get(['apiKey', 'baseUrl', 'model', 'customizations']);
           if (!apiKey || !baseUrl || !model) {
             sendResponse({ success: false, error: 'API configuration is missing. Please save settings in side panel.' });
+            return;
+          }
+
+          // Find enabled customizations for this domain
+          const domainCustomizations = Object.values(customizations).filter(c => c.domain === domain && c.enabled);
+          
+          // Check if token matches
+          const isValidToken = domainCustomizations.some(c => c.apiToken && c.apiToken === token);
+          if (!isValidToken) {
+            sendResponse({ success: false, error: 'Unauthorized: Invalid or missing API capability token.' });
             return;
           }
 
@@ -476,6 +539,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         const scriptId = id || `alterego-script-${Date.now()}`;
         const existing = id ? (customizations[id] || null) : null;
+        const apiToken = (existing && existing.apiToken) || generateApiToken();
 
         // Retrieve or initialize the conversation history
         let conversationHistory = [];
@@ -581,7 +645,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
             // Register script immediately
             await sendProgress(tabId, `Attempt ${attempt}/${maxAttempts}: Code generated. Injecting and reloading tab...`);
-            await registerUserScript(domain, scriptId, content.css, content.js);
+            await registerUserScript(domain, scriptId, content.css, content.js, apiToken);
 
             // Clear errors on tab before reload to ensure we only capture errors from this run
             await clearTabErrors(tabId);
@@ -719,7 +783,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             enabled: true,
             verificationSelector: content.verificationSelector || '',
             description: content.description || 'Custom layout and behaviors.',
-            history: finalHistory
+            apiToken: apiToken,
+            history: pruneHistory(finalHistory)
           };
           await chrome.storage.local.set({ customizations });
 
@@ -737,7 +802,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           await chrome.storage.local.set({ customizations });
 
           if (enabled) {
-            await registerUserScript(customizations[id].domain, customizations[id].id, customizations[id].css, customizations[id].js);
+            await registerUserScript(customizations[id].domain, customizations[id].id, customizations[id].css, customizations[id].js, customizations[id].apiToken);
           } else {
             await unregisterUserScript(customizations[id].id);
           }
