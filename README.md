@@ -1,5 +1,9 @@
 # AlterEgo
 
+<p align="center">
+  <img src="icons/icon512.png" alt="AlterEgo Logo" width="200" height="200" />
+</p>
+
 AlterEgo is a premium Manifest V3 Chrome Extension that uses AI (OpenAI-compatible protocol) to dynamically rewrite and customize webpage styles and behaviors. It provides a visual target picker, supports multiple parallel modifications per website, and implements a multi-turn **Agentic Self-Healing Loop** to automatically test, catch, and self-correct script errors.
 
 ---
