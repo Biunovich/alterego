@@ -38,6 +38,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const customizationList = document.getElementById('customization-list');
   const btnResetPage = document.getElementById('btn-reset-page');
+  const btnCancelGeneration = document.getElementById('btn-cancel-generation');
 
   // Hardcoded Base URLs for popular API providers
   const PROVIDER_URLS = {
@@ -454,6 +455,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       loaderOverlay.classList.remove('active');
       btnAlter.disabled = false;
       showStatus('Generation Failed', '#ff4757');
+    }
+  });
+
+  // Cancel/Stop generation
+  btnCancelGeneration.addEventListener('click', () => {
+    loaderOverlay.classList.remove('active');
+    btnAlter.disabled = false;
+    showStatus('Cancelled', '#ff4757');
+
+    if (currentTab) {
+      chrome.runtime.sendMessage({
+        action: 'cancel-generation',
+        tabId: currentTab.id
+      }).catch(() => {});
     }
   });
 

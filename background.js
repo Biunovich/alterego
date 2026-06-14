@@ -40,6 +40,60 @@ function compileUserScriptWrapper(css, js) {
   const escapedCss = css ? css.replace(/`/g, '\\`').replace(/\${/g, '\\${') : '';
   
   return `(function() {
+    // Helper function to call the background AI model
+    function askAlterEgoAI(promptText) {
+      return new Promise((resolve, reject) => {
+        const requestId = Math.random().toString(36).substring(2, 9);
+        const handler = (e) => {
+          window.removeEventListener('alterego-api-response-' + requestId, handler);
+          if (e.detail.success) {
+            resolve(e.detail.result);
+          } else {
+            reject(new Error(e.detail.error));
+          }
+        };
+        window.addEventListener('alterego-api-response-' + requestId, handler);
+        window.dispatchEvent(new CustomEvent('alterego-api-request', {
+          detail: { requestId, action: 'ai-completion', payload: { prompt: promptText } }
+        }));
+      });
+    }
+
+    // Expose globally in user script world
+    window.askAlterEgoAI = askAlterEgoAI;
+
+    // Helper function to wait for dynamic elements in SPA pages
+    function waitForElements(selector, timeout = 5000) {
+      return new Promise((resolve, reject) => {
+        const el = document.querySelectorAll(selector);
+        if (el && el.length > 0) {
+          return resolve(Array.from(el));
+        }
+
+        const observer = new MutationObserver(() => {
+          const elements = document.querySelectorAll(selector);
+          if (elements && elements.length > 0) {
+            observer.disconnect();
+            clearTimeout(timeoutId);
+            resolve(Array.from(elements));
+          }
+        });
+
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true
+        });
+
+        const timeoutId = setTimeout(() => {
+          observer.disconnect();
+          reject(new Error('Timeout waiting for selector: ' + selector));
+        }, timeout);
+      });
+    }
+
+    // Expose globally in user script world
+    window.waitForElements = waitForElements;
+
     // 1. Immediately inject custom styles to prevent layout flash (FOUC)
     const cssContent = \`${escapedCss}\`;
     if (cssContent) {
@@ -292,19 +346,17 @@ async function addTabError(tabId, error) {
   }
 }
 
-const activeVerifications = {}; // key: tabId, value: { resolve, statusReceived }
+const activeGenerations = {}; // key: tabId, value: { controller, cancelled: false }
 
 // Helper: send progress updates to the popup/side panel
-async function sendProgress(tabId, message) {
+function sendProgress(tabId, message) {
   console.log(`[AlterEgo][Tab ${tabId}] Progress:`, message);
-  try {
-    await chrome.runtime.sendMessage({
-      action: 'customization-progress',
-      message
-    });
-  } catch (e) {
+  chrome.runtime.sendMessage({
+    action: 'customization-progress',
+    message
+  }).catch(() => {
     // Popup might be closed or not listening, ignore
-  }
+  });
 }
 
 // Helper: robust JSON parser that handles codeblock wrappers
@@ -329,17 +381,71 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         } else {
           console.log(`[AlterEgo] Logged success status for tab ${tabId}`);
         }
-        
-        if (activeVerifications[tabId]) {
-          activeVerifications[tabId].statusReceived = request.status;
-          activeVerifications[tabId].resolve(request.status);
-        }
         sendResponse({ success: true });
       })();
     } else {
       sendResponse({ success: true });
     }
     return true;
+  }
+
+  if (request.action === 'cancel-generation') {
+    const { tabId } = request;
+    if (tabId && activeGenerations[tabId]) {
+      activeGenerations[tabId].cancelled = true;
+      activeGenerations[tabId].controller.abort();
+      delete activeGenerations[tabId];
+      console.log(`[AlterEgo] Cancelled generation for tab ${tabId}`);
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (request.action === 'alterego-api-request-relay') {
+    const { apiAction, payload } = request;
+    if (apiAction === 'ai-completion') {
+      (async () => {
+        try {
+          const { apiKey, baseUrl, model } = await chrome.storage.local.get(['apiKey', 'baseUrl', 'model']);
+          if (!apiKey || !baseUrl || !model) {
+            sendResponse({ success: false, error: 'API configuration is missing. Please save settings in side panel.' });
+            return;
+          }
+
+          const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+              model: model,
+              messages: [
+                { role: 'user', content: payload.prompt }
+              ],
+              temperature: payload.temperature ?? 0.2
+            })
+          });
+
+          if (!response.ok) {
+            const errText = await response.text();
+            sendResponse({ success: false, error: `AI API error (${response.status}): ${errText}` });
+            return;
+          }
+
+          const data = await response.json();
+          const resultText = data.choices[0].message.content;
+          sendResponse({ success: true, result: resultText });
+        } catch (err) {
+          console.error('[AlterEgo] Error in relayed API request:', err);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+    } else {
+      sendResponse({ success: false, error: `Unsupported API action: ${apiAction}` });
+    }
+    return true; // Keep message channel open
   }
 
   // Handle async response
@@ -417,189 +523,210 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         let verificationFailureReason = "";
         let verified = false;
 
+        const controller = new AbortController();
+        activeGenerations[tabId] = { controller, cancelled: false };
+
         // Clear errors before starting
         await clearTabErrors(tabId);
 
-        while (attempt <= maxAttempts) {
-          await sendProgress(tabId, `Attempt ${attempt}/${maxAttempts}: Querying AI model...`);
+        try {
+          while (attempt <= maxAttempts) {
+            if (activeGenerations[tabId]?.cancelled) {
+              throw new Error('Generation cancelled by user.');
+            }
 
-          let systemPrompt = (attempt === 1) ? SYSTEM_PROMPT_INITIAL : SYSTEM_PROMPT_RETRY;
-          
-          let apiMessages = [
-            { role: 'system', content: systemPrompt },
-            ...sessionMessages
+            await sendProgress(tabId, `Attempt ${attempt}/${maxAttempts}: Querying AI model...`);
+
+            let systemPrompt = (attempt === 1) ? SYSTEM_PROMPT_INITIAL : SYSTEM_PROMPT_RETRY;
+            
+            let apiMessages = [
+              { role: 'system', content: systemPrompt },
+              ...sessionMessages
+            ];
+
+            // Request completions from OpenAI-compatible endpoint
+            const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              signal: controller.signal,
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+              },
+              body: JSON.stringify({
+                model: model,
+                messages: apiMessages,
+                response_format: { type: 'json_object' },
+                temperature: 0.2
+              })
+            });
+
+            if (!response.ok) {
+              const errText = await response.text();
+              throw new Error(`AI API error (${response.status}): ${errText}`);
+            }
+
+            const data = await response.json();
+            const rawResponseText = data.choices[0].message.content.trim();
+            try {
+              content = parseJSONResponse(rawResponseText);
+            } catch (e) {
+              console.error('[AlterEgo] Failed to parse JSON response:', rawResponseText);
+              throw new Error(`AI returned invalid JSON: ${e.message}`);
+            }
+
+            if (activeGenerations[tabId]?.cancelled) {
+              throw new Error('Generation cancelled by user.');
+            }
+
+            // Register script immediately
+            await sendProgress(tabId, `Attempt ${attempt}/${maxAttempts}: Code generated. Injecting and reloading tab...`);
+            await registerUserScript(domain, scriptId, content.css, content.js);
+
+            // Clear errors on tab before reload to ensure we only capture errors from this run
+            await clearTabErrors(tabId);
+
+            // Set up verifier (wait for reload complete)
+            let resolveReload;
+            const reloadPromise = new Promise((resolve) => {
+              resolveReload = resolve;
+            });
+
+            const checkTabListener = (updatedTabId, changeInfo) => {
+              if (updatedTabId === tabId && changeInfo.status === 'complete') {
+                resolveReload();
+              }
+            };
+
+            chrome.tabs.onUpdated.addListener(checkTabListener);
+
+            const timeoutId = setTimeout(() => {
+              resolveReload();
+            }, 7000);
+
+            // Reload tab
+            await chrome.tabs.reload(tabId);
+
+            // Wait for reload to complete
+            await reloadPromise;
+
+            // Cleanup
+            chrome.tabs.onUpdated.removeListener(checkTabListener);
+            clearTimeout(timeoutId);
+
+            console.log(`[AlterEgo] Tab reload completed or timed out for tab ${tabId}`);
+
+            // Give the scripts a small grace period to execute their callbacks (e.g. 400ms)
+            await new Promise(resolve => setTimeout(resolve, 400));
+
+            if (activeGenerations[tabId]?.cancelled) {
+              throw new Error('Generation cancelled by user.');
+            }
+
+            // Verify status
+            const errors = await getTabErrors(tabId);
+            let domVerified = true;
+            let domErrorMsg = "";
+
+            if (content.verificationSelector) {
+              try {
+                // Ensure extractor is running on reload
+                await chrome.scripting.executeScript({
+                  target: { tabId: tabId },
+                  files: ['content/context-extractor.js']
+                });
+                const verifyRes = await chrome.tabs.sendMessage(tabId, { action: 'verify-dom', selector: content.verificationSelector });
+                if (verifyRes && verifyRes.exists) {
+                  if (verifyRes.isLogicalFailure) {
+                    domVerified = false;
+                    domErrorMsg = `Logical check failed: ${verifyRes.failureReason}`;
+                  } else {
+                    domVerified = true;
+                  }
+                } else {
+                  domVerified = false;
+                  domErrorMsg = `Selector '${content.verificationSelector}' was not found in the page DOM.`;
+                }
+              } catch (err) {
+                domVerified = false;
+                domErrorMsg = `Could not verify DOM: ${err.message}`;
+              }
+            }
+
+            if (errors.length > 0) {
+              const errList = errors.map(e => `${e.name || 'Error'}: ${e.message}`).join('\n');
+              verificationFailureReason = `The JavaScript code threw runtime exception(s):\n${errList}`;
+              if (domErrorMsg) {
+                verificationFailureReason += `\n\nAdditionally: ${domErrorMsg}`;
+              }
+              await sendProgress(tabId, `⚠️ Attempt ${attempt} failed with JS runtime error. Self-healing...`);
+              
+              // Append retry context to sessionMessages for the next turn
+              sessionMessages.push({
+                role: 'assistant',
+                content: rawResponseText
+              });
+              sessionMessages.push({
+                role: 'user',
+                content: buildUserPromptRetry(domain, prompt, content.css, content.js, verificationFailureReason, context)
+              });
+              attempt++;
+            } else if (!domVerified) {
+              verificationFailureReason = `DOM Verification Failed:\n${domErrorMsg}`;
+              await sendProgress(tabId, `⚠️ Attempt ${attempt} failed: verification selector not found. Self-healing...`);
+              
+              // Append retry context to sessionMessages for the next turn
+              sessionMessages.push({
+                role: 'assistant',
+                content: rawResponseText
+              });
+              sessionMessages.push({
+                role: 'user',
+                content: buildUserPromptRetry(domain, prompt, content.css, content.js, verificationFailureReason, context)
+              });
+              attempt++;
+            } else {
+              verified = true;
+              await sendProgress(tabId, `✓ Customization verified successfully!`);
+              break;
+            }
+          }
+
+          if (!verified) {
+            throw new Error(`Self-healing failed after ${maxAttempts} attempts.\nLast failure: ${verificationFailureReason}`);
+          }
+
+          // Construct the updated conversation history
+          const finalHistory = [
+            ...conversationHistory,
+            { role: 'user', content: existing ? buildRefinementUserPrompt(prompt) : buildUserPromptInitial(domain, targetSelector, prompt, null, context, targetedContext) },
+            { role: 'assistant', content: JSON.stringify({
+                css: content.css,
+                js: content.js,
+                verificationSelector: content.verificationSelector || '',
+                description: content.description || ''
+              }) 
+            }
           ];
 
-          // Request completions from OpenAI-compatible endpoint
-          const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
-          const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${apiKey}`
-            },
-            body: JSON.stringify({
-              model: model,
-              messages: apiMessages,
-              response_format: { type: 'json_object' },
-              temperature: 0.2
-            })
-          });
-
-          if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`AI API error (${response.status}): ${errText}`);
-          }
-
-          const data = await response.json();
-          const rawResponseText = data.choices[0].message.content.trim();
-          try {
-            content = parseJSONResponse(rawResponseText);
-          } catch (e) {
-            console.error('[AlterEgo] Failed to parse JSON response:', rawResponseText);
-            throw new Error(`AI returned invalid JSON: ${e.message}`);
-          }
-
-          // Register script immediately
-          await sendProgress(tabId, `Attempt ${attempt}/${maxAttempts}: Code generated. Injecting and reloading tab...`);
-          await registerUserScript(domain, scriptId, content.css, content.js);
-
-          // Clear errors on tab before reload to ensure we only capture errors from this run
-          await clearTabErrors(tabId);
-
-          // Set up verifier before reloading
-          let resolveStatus;
-          const statusPromise = new Promise((resolve) => {
-            resolveStatus = resolve;
-          });
-          
-          activeVerifications[tabId] = {
-            resolve: resolveStatus,
-            statusReceived: null
+          // Store customization in local storage
+          customizations[scriptId] = {
+            id: scriptId,
+            domain,
+            prompt,
+            css: content.css,
+            js: content.js,
+            enabled: true,
+            verificationSelector: content.verificationSelector || '',
+            description: content.description || 'Custom layout and behaviors.',
+            history: finalHistory
           };
+          await chrome.storage.local.set({ customizations });
 
-          const checkTabListener = (updatedTabId, changeInfo) => {
-            if (updatedTabId === tabId && changeInfo.status === 'complete') {
-              resolveStatus('complete');
-            }
-          };
-
-          chrome.tabs.onUpdated.addListener(checkTabListener);
-
-          const timeoutId = setTimeout(() => {
-            resolveStatus('timeout');
-          }, 7000);
-
-          // Reload tab
-          await chrome.tabs.reload(tabId);
-
-          const waitResult = await statusPromise;
-
-          // Cleanup
-          chrome.tabs.onUpdated.removeListener(checkTabListener);
-          clearTimeout(timeoutId);
-          delete activeVerifications[tabId];
-          console.log(`[AlterEgo] Verification wait ended for tab ${tabId} with result:`, waitResult);
-
-          if (waitResult === 'complete') {
-            // Give it a tiny bit of time for DOM/scripts to execute
-            await new Promise(resolve => setTimeout(resolve, 400));
-          }
-
-          // Verify status
-          const errors = await getTabErrors(tabId);
-          let domVerified = true;
-          let domErrorMsg = "";
-
-          if (content.verificationSelector) {
-            try {
-              // Ensure extractor is running on reload
-              await chrome.scripting.executeScript({
-                target: { tabId: tabId },
-                files: ['content/context-extractor.js']
-              });
-              const verifyRes = await chrome.tabs.sendMessage(tabId, { action: 'verify-dom', selector: content.verificationSelector });
-              domVerified = verifyRes ? !!verifyRes.exists : false;
-              if (!domVerified) {
-                domErrorMsg = `Selector '${content.verificationSelector}' was not found in the page DOM.`;
-              }
-            } catch (err) {
-              domVerified = false;
-              domErrorMsg = `Could not verify DOM: ${err.message}`;
-            }
-          }
-
-          if (errors.length > 0) {
-            const errList = errors.map(e => `${e.name || 'Error'}: ${e.message}`).join('\n');
-            verificationFailureReason = `The JavaScript code threw runtime exception(s):\n${errList}`;
-            if (domErrorMsg) {
-              verificationFailureReason += `\n\nAdditionally: ${domErrorMsg}`;
-            }
-            await sendProgress(tabId, `⚠️ Attempt ${attempt} failed with JS runtime error. Self-healing...`);
-            
-            // Append retry context to sessionMessages for the next turn
-            sessionMessages.push({
-              role: 'assistant',
-              content: rawResponseText
-            });
-            sessionMessages.push({
-              role: 'user',
-              content: buildUserPromptRetry(domain, prompt, content.css, content.js, verificationFailureReason, context)
-            });
-            attempt++;
-          } else if (!domVerified) {
-            verificationFailureReason = `DOM Verification Failed:\n${domErrorMsg}`;
-            await sendProgress(tabId, `⚠️ Attempt ${attempt} failed: verification selector not found. Self-healing...`);
-            
-            // Append retry context to sessionMessages for the next turn
-            sessionMessages.push({
-              role: 'assistant',
-              content: rawResponseText
-            });
-            sessionMessages.push({
-              role: 'user',
-              content: buildUserPromptRetry(domain, prompt, content.css, content.js, verificationFailureReason, context)
-            });
-            attempt++;
-          } else {
-            verified = true;
-            await sendProgress(tabId, `✓ Customization verified successfully!`);
-            break;
-          }
+          sendResponse({ success: true, description: content.description });
+        } finally {
+          delete activeGenerations[tabId];
         }
-
-        if (!verified) {
-          throw new Error(`Self-healing failed after ${maxAttempts} attempts.\nLast failure: ${verificationFailureReason}`);
-        }
-
-        // Construct the updated conversation history
-        const finalHistory = [
-          ...conversationHistory,
-          { role: 'user', content: existing ? buildRefinementUserPrompt(prompt) : buildUserPromptInitial(domain, targetSelector, prompt, null, context, targetedContext) },
-          { role: 'assistant', content: JSON.stringify({
-              css: content.css,
-              js: content.js,
-              verificationSelector: content.verificationSelector || '',
-              description: content.description || ''
-            }) 
-          }
-        ];
-
-        // Store customization in local storage
-        customizations[scriptId] = {
-          id: scriptId,
-          domain,
-          prompt,
-          css: content.css,
-          js: content.js,
-          enabled: true,
-          verificationSelector: content.verificationSelector || '',
-          description: content.description || 'Custom layout and behaviors.',
-          history: finalHistory
-        };
-        await chrome.storage.local.set({ customizations });
-
-        sendResponse({ success: true, description: content.description });
 
       } else if (request.action === 'toggle-customization') {
         const { id, enabled } = request;
@@ -654,6 +781,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
   };
 
-  handleMessage();
-  return true; // Keep response channel open for async completions
+  const asyncActions = ['generate-customization', 'toggle-customization', 'delete-customization'];
+  if (asyncActions.includes(request.action)) {
+    handleMessage();
+    return true;
+  }
 });

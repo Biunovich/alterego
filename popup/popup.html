@@ -374,24 +374,28 @@
       gap: 3px;
       flex-grow: 1;
       margin-right: 12px;
+      min-width: 0; /* Allow the text container to shrink below its content's intrinsic size and wrap */
     }
 
     .customization-domain {
       font-size: 14px;
       font-weight: 600;
       color: var(--text-main);
+      overflow-wrap: anywhere;
     }
 
     .customization-desc {
       font-size: 12px;
       color: var(--text-muted);
       line-height: 1.4;
+      overflow-wrap: anywhere; /* Ensure long words wrap */
     }
 
     .customization-actions {
       display: flex;
       align-items: center;
       gap: 12px;
+      flex-shrink: 0; /* Prevent icons from shrinking and disappearing */
     }
 
     /* Switch Styling */
@@ -585,6 +589,7 @@
       <div class="loader-overlay" id="loader-overlay">
         <div class="spinner"></div>
         <div class="loader-text" id="loader-text">Analyzing page and compiling script...</div>
+        <button class="btn-reset" id="btn-cancel-generation" style="margin-top: 10px; max-width: 120px;" type="button">Stop</button>
       </div>
     </div>
 

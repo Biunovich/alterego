@@ -166,8 +166,8 @@
   // Traverse the DOM to build a lightweight, semantic layout outline
   function getSimplifiedDOMContext() {
     const lines = [];
-    const maxDepth = 4;
-    const maxNodes = 120;
+    const maxDepth = 8; // Increased from 4 to 8 for deep SPA pages
+    const maxNodes = 200; // Increased from 120 to 200
     let nodeCount = 0;
 
     function traverse(node, depth = 0) {
@@ -177,18 +177,40 @@
       if (skipTags.includes(node.tagName)) return;
 
       const hasClassOrId = node.className || node.id;
-      const isSemantic = ['HEADER', 'FOOTER', 'NAV', 'ASIDE', 'MAIN', 'ARTICLE', 'SECTION', 'FORM', 'UL', 'OL', 'H1', 'H2', 'H3'].includes(node.tagName);
+      const isSemantic = ['HEADER', 'FOOTER', 'NAV', 'ASIDE', 'MAIN', 'ARTICLE', 'SECTION', 'FORM', 'UL', 'OL', 'H1', 'H2', 'H3', 'BUTTON', 'A'].includes(node.tagName);
+      const isCustomElement = node.tagName.includes('-'); // Capture custom component elements (e.g. ytd-*)
 
-      if (isSemantic || hasClassOrId) {
+      if (isSemantic || hasClassOrId || isCustomElement) {
         nodeCount++;
         let indent = '  '.repeat(depth);
         let desc = `${indent}<${node.tagName.toLowerCase()}`;
         if (node.id) desc += ` id="${node.id}"`;
         if (node.className && typeof node.className === 'string') {
-          const classes = node.className.trim().split(/\s+/).filter(c => c.length > 0).slice(0, 2).join(' ');
+          // Filter out very long utility classes
+          const classes = node.className.trim().split(/\s+/)
+            .filter(c => c.length > 0 && c.length < 30 && !/\d/.test(c))
+            .slice(0, 3)
+            .join(' ');
           if (classes) desc += ` class="${classes}"`;
         }
+        
+        // Also capture critical attributes for links
+        if (node.tagName === 'A' && node.getAttribute('href')) {
+          desc += ` href="${node.getAttribute('href')}"`;
+        }
+        
         desc += '>';
+        
+        // Include text preview if short
+        const directText = Array.from(node.childNodes)
+          .filter(n => n.nodeType === Node.TEXT_NODE)
+          .map(n => n.textContent.trim())
+          .join('')
+          .substring(0, 40);
+        if (directText) {
+          desc += ` (Text: "${directText}")`;
+        }
+
         lines.push(desc);
       }
 
@@ -301,6 +323,27 @@
     });
   });
 
+  // Listen for API requests from USER_SCRIPT world and relay them to background
+  window.addEventListener('alterego-api-request', (e) => {
+    const { requestId, action, payload } = e.detail || {};
+    console.log('[AlterEgo] Relaying API request from user script:', action, requestId);
+    chrome.runtime.sendMessage({
+      action: 'alterego-api-request-relay',
+      apiAction: action,
+      payload: payload
+    }).then(response => {
+      console.log('[AlterEgo] Received API response from background, sending back to user script:', requestId);
+      window.dispatchEvent(new CustomEvent(`alterego-api-response-${requestId}`, {
+        detail: response
+      }));
+    }).catch(err => {
+      console.warn('[AlterEgo] Failed to process API request:', err);
+      window.dispatchEvent(new CustomEvent(`alterego-api-response-${requestId}`, {
+        detail: { success: false, error: err.message }
+      }));
+    });
+  });
+
   // Handle messages from the Side Panel / Background Script
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'get-context') {
@@ -317,13 +360,56 @@
       sendResponse({ status: 'picking_stopped' });
     } else if (message.action === 'verify-dom') {
       try {
-        const exists = message.selector ? !!document.querySelector(message.selector) : true;
-        sendResponse({ exists });
+        if (!message.selector) {
+          sendResponse({ exists: true, isLogicalFailure: false });
+          return;
+        }
+
+        const el = document.querySelector(message.selector);
+        if (!el) {
+          sendResponse({ exists: false });
+          return;
+        }
+
+        let isLogicalFailure = false;
+        let failureReason = "";
+
+        const textContent = (el.innerText || el.textContent || "").trim();
+
+        // 1. Check for invalid placeholder patterns (undefined, null, NaN, [object Object])
+        const invalidPatterns = [
+          { pattern: /\bundefined\b/i, label: "undefined" },
+          { pattern: /\bnull\b/i, label: "null" },
+          { pattern: /\bNaN\b/, label: "NaN" },
+          { pattern: /\[object\s+Object\]/i, label: "[object Object]" }
+        ];
+
+        for (const { pattern, label } of invalidPatterns) {
+          if (pattern.test(textContent)) {
+            isLogicalFailure = true;
+            failureReason = `Element matched selector "${message.selector}" but contains placeholder value "${label}" in its content: "${textContent}"`;
+            break;
+          }
+        }
+
+        // 2. Check if element is completely empty and should not be
+        if (!isLogicalFailure) {
+          const naturallyEmptyTags = ['img', 'input', 'textarea', 'select', 'canvas', 'video', 'audio', 'iframe', 'svg', 'button'];
+          const tagName = el.tagName.toLowerCase();
+          const hasNoChildren = el.children.length === 0;
+          const hasNoText = textContent === "";
+
+          if (hasNoText && hasNoChildren && !naturallyEmptyTags.includes(tagName)) {
+            isLogicalFailure = true;
+            failureReason = `Element <${tagName}> matched selector "${message.selector}" but is completely empty (has no text and no children).`;
+          }
+        }
+
+        sendResponse({ exists: true, isLogicalFailure, failureReason });
       } catch (err) {
         console.warn('[AlterEgo] DOM verification error:', err);
         sendResponse({ exists: false, error: err.message });
       }
     }
-    return true; // Keep message channel open for async response if needed
   });
 })();
